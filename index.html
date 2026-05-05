@@ -6058,6 +6058,53 @@ h2{
   background:var(--semi);
   color:#725CA3;
 }
+
+.login-google{
+  height:42px;
+  border:1.5px solid #E7DDF8;
+  border-radius:15px;
+  background:#fff;
+  color:#4D3D71;
+  font-size:13px;
+  font-weight:800;
+  display:flex;
+  align-items:center;
+  justify-content:center;
+  gap:8px;
+  cursor:pointer;
+}
+.login-google::before{
+  content:"G";
+  width:20px;
+  height:20px;
+  border-radius:999px;
+  display:grid;
+  place-items:center;
+  background:#F6F2FF;
+  color:#725CA3;
+  font-size:12px;
+  font-weight:900;
+}
+.login-form.cloud-logged-in label[data-auth-field],
+.login-form.cloud-logged-in .login-save,
+.login-form.cloud-logged-in .login-google{
+  display:none;
+}
+.login-form.cloud-logged-in .login-actions{
+  grid-template-columns:1fr;
+}
+.login-status-pill{
+  display:inline-flex;
+  align-items:center;
+  gap:6px;
+  margin-top:10px;
+  padding:8px 11px;
+  border-radius:999px;
+  background:#F2ECFF;
+  color:#725CA3;
+  font-size:12px;
+  font-weight:800;
+}
 .setting-note{
   margin:12px 0 0;
   padding:13px 14px;
@@ -7225,22 +7272,23 @@ h2{
           <span>유저명</span>
           <input id="settingUserName" maxlength="12" placeholder="예: 수영" autocomplete="nickname" />
         </label>
-        <label>
+        <label data-auth-field>
           <span>이메일</span>
           <input id="settingEmail" type="email" placeholder="myfloca@email.com" autocomplete="email" />
         </label>
-        <label>
+        <label data-auth-field>
           <span>비밀번호</span>
           <input id="settingPassword" type="password" placeholder="6자 이상" autocomplete="current-password" />
         </label>
+        <button class="login-google" id="googleLoginBtn" type="button">Google로 계속하기</button>
         <div class="login-actions">
-          <button class="login-save" id="saveUserName">로그인 / 회원가입</button>
+          <button class="login-save" id="saveUserName">이메일로 로그인 / 회원가입</button>
           <button class="login-logout" id="logoutUserName">로그아웃</button>
         </div>
         <p class="setting-login-message" id="settingLoginMessage"></p>
       </div>
 
-      <p class="setting-note">이메일/비밀번호로 로그인하면 같은 계정으로 접속한 다른 기기에서도 데이터가 동기화돼요. 이메일 없이 유저명만 저장하면 이 브라우저에만 저장돼요.</p>
+      <p class="setting-note">처음 한 번만 Google 또는 이메일로 로그인하면 다음부터는 자동으로 로그인 상태가 유지돼요. 로그아웃하지 않으면 여러 기기에서 같은 계정으로 동기화돼요.</p>
     </div>
   
 
@@ -7436,7 +7484,11 @@ h2{
     createUserWithEmailAndPassword,
     signInWithEmailAndPassword,
     signOut,
-    updateProfile
+    updateProfile,
+    GoogleAuthProvider,
+    signInWithPopup,
+    setPersistence,
+    browserLocalPersistence
   } from "https://www.gstatic.com/firebasejs/12.12.1/firebase-auth.js";
   import {
     getFirestore,
@@ -7458,6 +7510,8 @@ h2{
   const firebaseApp = initializeApp(firebaseConfig);
   const auth = getAuth(firebaseApp);
   const db = getFirestore(firebaseApp);
+  const googleProvider = new GoogleAuthProvider();
+  setPersistence(auth, browserLocalPersistence).catch(error => console.warn("FLOCA auth persistence failed", error));
 
   let activeUser = null;
   let authReadyResolved = false;
@@ -7506,6 +7560,15 @@ h2{
     return { saved:true };
   }
 
+  async function signInWithGoogle(displayName){
+    const credential = await signInWithPopup(auth, googleProvider);
+    if(displayName && credential.user && !credential.user.displayName){
+      await updateProfile(credential.user, { displayName });
+    }
+    activeUser = credential.user;
+    return credential.user;
+  }
+
   async function logout(){
     await signOut(auth);
   }
@@ -7524,6 +7587,7 @@ h2{
     getUser: () => activeUser,
     authReady,
     signInOrCreate,
+    signInWithGoogle,
     loadSnapshot,
     saveSnapshot,
     logout
@@ -9038,14 +9102,28 @@ function renderSettingsProfile(){
   const status = document.getElementById("settingLoginStatus");
   const input = document.getElementById("settingUserName");
   const msg = document.getElementById("settingLoginMessage");
+  const loginForm = document.querySelector(".login-form");
+  const logoutBtn = document.getElementById("logoutUserName");
 
-  if(currentName) currentName.textContent = `${name}님`;
   const cloudUser = window.flocaCloud?.getUser?.();
-  if(status) status.textContent = cloudUser ? `${cloudUser.email} 계정으로 동기화 중이에요.` : (currentUser?.isGuest ? "기본 이름으로 사용 중이에요." : "이 브라우저에 저장된 유저명으로 표시 중이에요.");
+  const displayName = cloudUser?.displayName || name || "플로카";
+
+  if(currentName) currentName.textContent = `${displayName}님`;
+  if(status) status.innerHTML = cloudUser
+    ? `${escapeHTML(cloudUser.email || "Google 계정")} 계정으로 자동 동기화 중이에요.<br><span class="login-status-pill">로그인 유지 중</span>`
+    : (currentUser?.isGuest ? "기본 이름으로 사용 중이에요." : "이 브라우저에 저장된 유저명으로 표시 중이에요.");
+
   if(input) input.value = currentUser?.isGuest ? "" : name;
+
   const emailInput = document.getElementById("settingEmail");
   if(emailInput && cloudUser?.email) emailInput.value = cloudUser.email;
-  if(msg) msg.textContent = "";
+
+  const passwordInput = document.getElementById("settingPassword");
+  if(passwordInput && cloudUser) passwordInput.value = "";
+
+  if(loginForm) loginForm.classList.toggle("cloud-logged-in", !!cloudUser);
+  if(logoutBtn) logoutBtn.textContent = cloudUser ? "로그아웃" : "로컬 이름 초기화";
+  if(msg) msg.textContent = cloudUser ? "다음부터는 이 브라우저에서 자동으로 로그인돼요." : "";
 }
 
 async function saveUserNameFromSettings(){
@@ -9123,6 +9201,51 @@ async function saveUserNameFromSettings(){
       if(error?.code === "auth/unauthorized-domain") msg.textContent = "Firebase Authorized domains에 alex020617.github.io를 추가해 주세요.";
       else if(error?.code === "auth/invalid-credential") msg.textContent = "이메일 또는 비밀번호가 맞지 않아요.";
       else msg.textContent = "로그인 실패: Firebase Authentication / Firestore 설정을 확인해 주세요.";
+    }
+  }
+}
+
+async function loginWithGoogleFromSettings(){
+  const input = document.getElementById("settingUserName");
+  const msg = document.getElementById("settingLoginMessage");
+  const username = (input?.value || "").trim();
+
+  if(!window.flocaCloud){
+    if(msg) msg.textContent = "Firebase 연결을 불러오는 중이에요. 잠시 후 다시 눌러주세요.";
+    return;
+  }
+
+  try{
+    if(msg) msg.textContent = "Google 로그인 창을 여는 중이에요...";
+    const user = await window.flocaCloud.signInWithGoogle(username || getDisplayUserName());
+    currentUser = {
+      username: username || user.displayName || getDisplayUserName(),
+      email:user.email,
+      uid:user.uid,
+      isGuest:false,
+      cloud:true,
+      provider:"google",
+      updatedAt:new Date().toISOString()
+    };
+    localStorage.setItem(FLOCA_USER_KEY, JSON.stringify(currentUser));
+
+    const snapshot = await window.flocaCloud.loadSnapshot();
+    if(snapshot){
+      applyFlocaSnapshot(snapshot);
+      if(msg) msg.textContent = "Google 로그인 완료. 클라우드 데이터를 불러왔어요.";
+    }else{
+      await flocaSaveToCloudNow();
+      if(msg) msg.textContent = "Google 로그인 완료. 현재 기기 데이터를 클라우드에 저장했어요.";
+    }
+    renderSettingsProfile();
+    renderMypageUserProfile();
+  }catch(error){
+    console.error(error);
+    if(msg){
+      if(error?.code === "auth/unauthorized-domain") msg.textContent = "Firebase 승인된 도메인에 alex020617.github.io를 추가해 주세요.";
+      else if(error?.code === "auth/popup-closed-by-user") msg.textContent = "Google 로그인 창이 닫혔어요. 다시 시도해 주세요.";
+      else if(error?.code === "auth/popup-blocked") msg.textContent = "팝업이 차단됐어요. 브라우저 팝업 허용 후 다시 시도해 주세요.";
+      else msg.textContent = "Google 로그인 실패: Firebase Google 로그인 설정을 확인해 주세요.";
     }
   }
 }
@@ -9410,6 +9533,17 @@ window.addEventListener("floca:auth-changed", async event => {
     const snapshot = await window.flocaCloud.loadSnapshot();
     if(snapshot){
       applyFlocaSnapshot(snapshot);
+      currentUser = {
+        ...(currentUser || {}),
+        username: user.displayName || currentUser?.username || getDisplayUserName(),
+        email:user.email,
+        uid:user.uid,
+        isGuest:false,
+        cloud:true,
+        updatedAt:new Date().toISOString()
+      };
+      saveLocalSnapshot();
+      renderSettingsProfile();
     }else{
       currentUser = {
         username: user.displayName || getDisplayUserName(),
