@@ -9269,10 +9269,12 @@ async function resetUserNameFromSettings(){
 
 function bindSettingEvents(){
   const saveBtn = document.getElementById("saveUserName");
+  const googleBtn = document.getElementById("googleLoginBtn");
   const logoutBtn = document.getElementById("logoutUserName");
   const input = document.getElementById("settingUserName");
 
   if(saveBtn) saveBtn.addEventListener("click", saveUserNameFromSettings);
+  if(googleBtn) googleBtn.addEventListener("click", loginWithGoogleFromSettings);
   if(logoutBtn) logoutBtn.addEventListener("click", resetUserNameFromSettings);
   if(input) input.addEventListener("keydown", e=>{
     if(e.key === "Enter"){
