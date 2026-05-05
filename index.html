@@ -7419,6 +7419,32 @@ h2{
   <button class="nav-item" data-nav="setting"><span>⚙️</span>설정</button>
 </nav>
 
+<!-- Firebase init start: FLOCA cloud sync step 1 -->
+<script type="module">
+  import { initializeApp } from "https://www.gstatic.com/firebasejs/12.12.1/firebase-app.js";
+  import { getAuth } from "https://www.gstatic.com/firebasejs/12.12.1/firebase-auth.js";
+  import { getFirestore } from "https://www.gstatic.com/firebasejs/12.12.1/firebase-firestore.js";
+
+  const firebaseConfig = {
+    apiKey: "AIzaSyBnJhHBEa56pvZV5PJJceDrqmljQ-xCUx8",
+    authDomain: "floca-020617.firebaseapp.com",
+    projectId: "floca-020617",
+    storageBucket: "floca-020617.firebasestorage.app",
+    messagingSenderId: "286579335153",
+    appId: "1:286579335153:web:145c19dceb0c5b22fd6e50"
+  };
+
+  const firebaseApp = initializeApp(firebaseConfig);
+  const auth = getAuth(firebaseApp);
+  const db = getFirestore(firebaseApp);
+
+  // 기존 FLOCA 스크립트가 깨지지 않도록 전역 객체로만 연결해둡니다.
+  // 다음 단계에서 localStorage 저장 함수와 Firestore 저장 함수를 연결하면 여러 기기 동기화가 됩니다.
+  window.flocaFirebase = { firebaseApp, auth, db };
+  window.dispatchEvent(new CustomEvent("floca:firebase-ready", { detail: window.flocaFirebase }));
+</script>
+<!-- Firebase init end -->
+
 <script>
 const FLOCA_USER_KEY = "floca_user_profile";
 
