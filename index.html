@@ -7210,7 +7210,7 @@ h2{
 
     <div class="card setting-card">
       <h2>로그인 / 유저명 설정</h2>
-      <p class="sub">지금은 브라우저에 저장되는 간단 로그인 방식이에요.</p>
+      <p class="sub">이메일로 로그인하면 여러 기기에서 같은 목표와 기록을 불러올 수 있어요.</p>
 
       <div class="login-profile-box">
         <div class="login-avatar">🌱</div>
@@ -7225,14 +7225,22 @@ h2{
           <span>유저명</span>
           <input id="settingUserName" maxlength="12" placeholder="예: 수영" autocomplete="nickname" />
         </label>
+        <label>
+          <span>이메일</span>
+          <input id="settingEmail" type="email" placeholder="myfloca@email.com" autocomplete="email" />
+        </label>
+        <label>
+          <span>비밀번호</span>
+          <input id="settingPassword" type="password" placeholder="6자 이상" autocomplete="current-password" />
+        </label>
         <div class="login-actions">
-          <button class="login-save" id="saveUserName">로그인하기</button>
-          <button class="login-logout" id="logoutUserName">초기화</button>
+          <button class="login-save" id="saveUserName">로그인 / 회원가입</button>
+          <button class="login-logout" id="logoutUserName">로그아웃</button>
         </div>
         <p class="setting-login-message" id="settingLoginMessage"></p>
       </div>
 
-      <p class="setting-note">저장하면 홈 화면 인사말의 “플로카님”이 설정한 유저명으로 바뀌어요. 예: 좋은 아침이에요, 수영님!</p>
+      <p class="setting-note">이메일/비밀번호로 로그인하면 같은 계정으로 접속한 다른 기기에서도 데이터가 동기화돼요. 이메일 없이 유저명만 저장하면 이 브라우저에만 저장돼요.</p>
     </div>
   
 
@@ -7419,11 +7427,24 @@ h2{
   <button class="nav-item" data-nav="setting"><span>⚙️</span>설정</button>
 </nav>
 
-<!-- Firebase init start: FLOCA cloud sync step 1 -->
+<!-- Firebase cloud sync start -->
 <script type="module">
   import { initializeApp } from "https://www.gstatic.com/firebasejs/12.12.1/firebase-app.js";
-  import { getAuth } from "https://www.gstatic.com/firebasejs/12.12.1/firebase-auth.js";
-  import { getFirestore } from "https://www.gstatic.com/firebasejs/12.12.1/firebase-firestore.js";
+  import {
+    getAuth,
+    onAuthStateChanged,
+    createUserWithEmailAndPassword,
+    signInWithEmailAndPassword,
+    signOut,
+    updateProfile
+  } from "https://www.gstatic.com/firebasejs/12.12.1/firebase-auth.js";
+  import {
+    getFirestore,
+    doc,
+    getDoc,
+    setDoc,
+    serverTimestamp
+  } from "https://www.gstatic.com/firebasejs/12.12.1/firebase-firestore.js";
 
   const firebaseConfig = {
     apiKey: "AIzaSyBnJhHBEa56pvZV5PJJceDrqmljQ-xCUx8",
@@ -7438,12 +7459,78 @@ h2{
   const auth = getAuth(firebaseApp);
   const db = getFirestore(firebaseApp);
 
-  // 기존 FLOCA 스크립트가 깨지지 않도록 전역 객체로만 연결해둡니다.
-  // 다음 단계에서 localStorage 저장 함수와 Firestore 저장 함수를 연결하면 여러 기기 동기화가 됩니다.
+  let activeUser = null;
+  let authReadyResolved = false;
+  let resolveAuthReady;
+  const authReady = new Promise(resolve => { resolveAuthReady = resolve; });
+
+  function appStateRef(){
+    if(!activeUser) return null;
+    return doc(db, "users", activeUser.uid, "floca", "appState");
+  }
+
+  async function signInOrCreate(email, password, displayName){
+    let credential;
+    try{
+      credential = await signInWithEmailAndPassword(auth, email, password);
+    }catch(error){
+      if(error && (error.code === "auth/user-not-found" || error.code === "auth/invalid-credential")){
+        credential = await createUserWithEmailAndPassword(auth, email, password);
+      }else{
+        throw error;
+      }
+    }
+    if(displayName){
+      await updateProfile(credential.user, { displayName });
+    }
+    activeUser = credential.user;
+    return credential.user;
+  }
+
+  async function loadSnapshot(){
+    const ref = appStateRef();
+    if(!ref) return null;
+    const snap = await getDoc(ref);
+    if(!snap.exists()) return null;
+    const data = snap.data() || {};
+    return data.snapshot || null;
+  }
+
+  async function saveSnapshot(snapshot){
+    const ref = appStateRef();
+    if(!ref || !snapshot) return { skipped:true };
+    await setDoc(ref, {
+      snapshot,
+      updatedAt: serverTimestamp()
+    }, { merge:true });
+    return { saved:true };
+  }
+
+  async function logout(){
+    await signOut(auth);
+  }
+
+  onAuthStateChanged(auth, user => {
+    activeUser = user;
+    if(!authReadyResolved){
+      authReadyResolved = true;
+      resolveAuthReady(user);
+    }
+    window.dispatchEvent(new CustomEvent("floca:auth-changed", { detail:{ user } }));
+  });
+
   window.flocaFirebase = { firebaseApp, auth, db };
-  window.dispatchEvent(new CustomEvent("floca:firebase-ready", { detail: window.flocaFirebase }));
+  window.flocaCloud = {
+    getUser: () => activeUser,
+    authReady,
+    signInOrCreate,
+    loadSnapshot,
+    saveSnapshot,
+    logout
+  };
+  window.dispatchEvent(new CustomEvent("floca:firebase-ready", { detail: window.flocaCloud }));
 </script>
-<!-- Firebase init end -->
+<!-- Firebase cloud sync end -->
 
 <script>
 const FLOCA_USER_KEY = "floca_user_profile";
@@ -7553,6 +7640,7 @@ function updateTimelineItemTime(id, hour, dateString = selectedDate){
   }
   renderTodos();
   if(currentGoalLevel === "day") renderGoalsSection();
+  if(window.flocaScheduleCloudSave) window.flocaScheduleCloudSave();
 }
 
 function timelineHourBounds(items){
@@ -8204,11 +8292,13 @@ if(savedBrain) brainDump.value = savedBrain;
 
 brainDump.addEventListener("input", ()=>{
   localStorage.setItem("floca_brain_dump", brainDump.value);
+  if(window.flocaScheduleCloudSave) window.flocaScheduleCloudSave();
 });
 
 document.getElementById("clearBrain").addEventListener("click", ()=>{
   brainDump.value = "";
   localStorage.removeItem("floca_brain_dump");
+  if(window.flocaScheduleCloudSave) window.flocaScheduleCloudSave();
 });
 
 
@@ -8220,6 +8310,7 @@ let dailyCloseRecords = JSON.parse(localStorage.getItem("floca_daily_close_recor
 
 function saveDailyCloseRecords(){
   localStorage.setItem("floca_daily_close_records", JSON.stringify(dailyCloseRecords));
+  if(window.flocaScheduleCloudSave) window.flocaScheduleCloudSave();
 }
 
 function getTodayKey(){
@@ -8433,6 +8524,7 @@ normalizeRewardState();
 function saveRewardState(){
   normalizeRewardState();
   localStorage.setItem("floca_reward_state", JSON.stringify(rewardState));
+  if(window.flocaScheduleCloudSave) window.flocaScheduleCloudSave();
 }
 
 function getTotalDoneCount(){
@@ -8948,15 +9040,22 @@ function renderSettingsProfile(){
   const msg = document.getElementById("settingLoginMessage");
 
   if(currentName) currentName.textContent = `${name}님`;
-  if(status) status.textContent = currentUser?.isGuest ? "기본 이름으로 사용 중이에요." : "로그인된 유저명으로 표시 중이에요.";
+  const cloudUser = window.flocaCloud?.getUser?.();
+  if(status) status.textContent = cloudUser ? `${cloudUser.email} 계정으로 동기화 중이에요.` : (currentUser?.isGuest ? "기본 이름으로 사용 중이에요." : "이 브라우저에 저장된 유저명으로 표시 중이에요.");
   if(input) input.value = currentUser?.isGuest ? "" : name;
+  const emailInput = document.getElementById("settingEmail");
+  if(emailInput && cloudUser?.email) emailInput.value = cloudUser.email;
   if(msg) msg.textContent = "";
 }
 
-function saveUserNameFromSettings(){
+async function saveUserNameFromSettings(){
   const input = document.getElementById("settingUserName");
+  const emailInput = document.getElementById("settingEmail");
+  const passwordInput = document.getElementById("settingPassword");
   const msg = document.getElementById("settingLoginMessage");
   const username = (input?.value || "").trim();
+  const email = (emailInput?.value || "").trim();
+  const password = passwordInput?.value || "";
 
   if(!username){
     if(msg) msg.textContent = "유저명을 입력해 주세요.";
@@ -8969,26 +9068,80 @@ function saveUserNameFromSettings(){
     return;
   }
 
+  if(email && password && password.length < 6){
+    if(msg) msg.textContent = "비밀번호는 6자 이상으로 입력해 주세요.";
+    return;
+  }
+
   currentUser = {
     username,
-    isGuest:false,
+    isGuest: !(email && password),
     updatedAt:new Date().toISOString()
   };
   localStorage.setItem(FLOCA_USER_KEY, JSON.stringify(currentUser));
   setGreeting();
   renderSettingsProfile();
   renderMypageUserProfile();
-  if(msg) msg.textContent = `${username}님으로 로그인했어요.`;
+
+  if(!email || !password){
+    if(msg) msg.textContent = `${username}님으로 이 브라우저에 저장했어요. 여러 기기 동기화는 이메일/비밀번호를 입력해 주세요.`;
+    flocaScheduleCloudSave();
+    return;
+  }
+
+  if(!window.flocaCloud){
+    if(msg) msg.textContent = "Firebase 연결을 불러오는 중이에요. 잠시 후 다시 눌러주세요.";
+    return;
+  }
+
+  try{
+    if(msg) msg.textContent = "로그인 중이에요...";
+    const user = await window.flocaCloud.signInOrCreate(email, password, username);
+    currentUser = {
+      username,
+      email:user.email,
+      uid:user.uid,
+      isGuest:false,
+      cloud:true,
+      updatedAt:new Date().toISOString()
+    };
+    localStorage.setItem(FLOCA_USER_KEY, JSON.stringify(currentUser));
+
+    const snapshot = await window.flocaCloud.loadSnapshot();
+    if(snapshot){
+      applyFlocaSnapshot(snapshot);
+      if(msg) msg.textContent = "로그인 완료. 클라우드 데이터를 불러왔어요.";
+    }else{
+      await flocaSaveToCloudNow();
+      if(msg) msg.textContent = "로그인 완료. 현재 기기 데이터를 클라우드에 저장했어요.";
+    }
+    renderSettingsProfile();
+    renderMypageUserProfile();
+  }catch(error){
+    console.error(error);
+    if(msg){
+      if(error?.code === "auth/unauthorized-domain") msg.textContent = "Firebase Authorized domains에 alex020617.github.io를 추가해 주세요.";
+      else if(error?.code === "auth/invalid-credential") msg.textContent = "이메일 또는 비밀번호가 맞지 않아요.";
+      else msg.textContent = "로그인 실패: Firebase Authentication / Firestore 설정을 확인해 주세요.";
+    }
+  }
 }
 
-function resetUserNameFromSettings(){
+async function resetUserNameFromSettings(){
   const msg = document.getElementById("settingLoginMessage");
-  localStorage.removeItem(FLOCA_USER_KEY);
-  currentUser = {username:"플로카", isGuest:true};
+  try{
+    if(window.flocaCloud?.getUser?.()) await window.flocaCloud.logout();
+  }catch(error){
+    console.error(error);
+  }
+  currentUser = {username:getDisplayUserName(), isGuest:true, updatedAt:new Date().toISOString()};
+  localStorage.setItem(FLOCA_USER_KEY, JSON.stringify(currentUser));
+  const passwordInput = document.getElementById("settingPassword");
+  if(passwordInput) passwordInput.value = "";
   setGreeting();
   renderSettingsProfile();
   renderMypageUserProfile();
-  if(msg) msg.textContent = "기본 이름인 플로카님으로 돌아갔어요.";
+  if(msg) msg.textContent = "로그아웃했어요. 이 기기에는 로컬 데이터가 남아 있어요.";
 }
 
 function bindSettingEvents(){
@@ -9145,6 +9298,137 @@ let selectedMonth = new Date().getMonth() + 1;
 let selectedWeek = 1;
 let selectedDate = new Date().toISOString().slice(0,10);
 let dailyGoalViewMode = "calendar";
+
+/* Firebase cloud sync bridge */
+let flocaCloudSaveTimer = null;
+let flocaCloudIsApplying = false;
+
+function getFlocaSnapshot(){
+  try{ syncDayGoals(); }catch(e){}
+  return {
+    version: 1,
+    savedAt: new Date().toISOString(),
+    currentUser,
+    goals,
+    todos,
+    dailyCloseRecords,
+    rewardState,
+    brainDump: brainDump ? brainDump.value : "",
+    selectedMonth,
+    selectedWeek,
+    selectedDate,
+    currentGoalLevel
+  };
+}
+
+function saveLocalSnapshot(){
+  try{ localStorage.setItem(FLOCA_USER_KEY, JSON.stringify(currentUser)); }catch(e){}
+  try{ localStorage.setItem("floca_daily_close_records", JSON.stringify(dailyCloseRecords || {})); }catch(e){}
+  try{ localStorage.setItem("floca_reward_state", JSON.stringify(rewardState || {})); }catch(e){}
+  try{ if(brainDump) localStorage.setItem("floca_brain_dump", brainDump.value || ""); }catch(e){}
+}
+
+function renderAllAfterCloudSync(message){
+  try{ setGreeting(); }catch(e){}
+  try{ renderTodos(); }catch(e){}
+  try{ renderGoalsSection(); }catch(e){}
+  try{ renderDailyCloseCard(); }catch(e){}
+  try{ renderRewardPage(message); }catch(e){}
+  try{ renderMypage(); }catch(e){}
+  try{ renderSettingsProfile(); }catch(e){}
+}
+
+function applyFlocaSnapshot(snapshot){
+  if(!snapshot || flocaCloudIsApplying) return;
+  flocaCloudIsApplying = true;
+  try{
+    if(snapshot.currentUser) currentUser = snapshot.currentUser;
+    if(snapshot.goals){
+      goals.life = Array.isArray(snapshot.goals.life) ? snapshot.goals.life : [];
+      goals.year = Array.isArray(snapshot.goals.year) ? snapshot.goals.year : [];
+      goals.month = snapshot.goals.month || {};
+      goals.week = snapshot.goals.week || {};
+      goals.day = snapshot.goals.day || {};
+    }
+    if(snapshot.selectedMonth) selectedMonth = snapshot.selectedMonth;
+    if(snapshot.selectedWeek) selectedWeek = snapshot.selectedWeek;
+    if(snapshot.selectedDate) selectedDate = snapshot.selectedDate;
+    if(snapshot.currentGoalLevel) currentGoalLevel = snapshot.currentGoalLevel;
+    if(snapshot.dailyCloseRecords) dailyCloseRecords = snapshot.dailyCloseRecords;
+    if(snapshot.rewardState){
+      rewardState = snapshot.rewardState;
+      normalizeRewardState();
+    }
+    if(brainDump && typeof snapshot.brainDump === "string") brainDump.value = snapshot.brainDump;
+    const todayKey = dayKey(selectedDate);
+    todos = goals.day[todayKey] || snapshot.todos || [];
+    goals.day[todayKey] = todos;
+    saveLocalSnapshot();
+    renderAllAfterCloudSync("클라우드 데이터를 불러왔어요.");
+  }finally{
+    flocaCloudIsApplying = false;
+  }
+}
+
+async function flocaSaveToCloudNow(){
+  if(flocaCloudIsApplying) return;
+  const cloud = window.flocaCloud;
+  if(!cloud || !cloud.getUser || !cloud.getUser()) return;
+  saveLocalSnapshot();
+  try{
+    await cloud.saveSnapshot(getFlocaSnapshot());
+    const msg = document.getElementById("settingLoginMessage");
+    if(msg && document.getElementById("settingView") && !document.getElementById("settingView").classList.contains("hidden")){
+      msg.textContent = "클라우드에 저장됐어요.";
+    }
+  }catch(error){
+    console.error("FLOCA cloud save failed", error);
+    const msg = document.getElementById("settingLoginMessage");
+    if(msg) msg.textContent = "클라우드 저장 실패: Firebase 설정을 확인해 주세요.";
+  }
+}
+
+function flocaScheduleCloudSave(){
+  if(flocaCloudIsApplying) return;
+  clearTimeout(flocaCloudSaveTimer);
+  flocaCloudSaveTimer = setTimeout(flocaSaveToCloudNow, 900);
+}
+
+window.flocaBuildSnapshot = getFlocaSnapshot;
+window.flocaApplySnapshot = applyFlocaSnapshot;
+window.flocaScheduleCloudSave = flocaScheduleCloudSave;
+
+window.addEventListener("floca:auth-changed", async event => {
+  const user = event.detail?.user;
+  if(!user){
+    renderSettingsProfile();
+    return;
+  }
+  const emailInput = document.getElementById("settingEmail");
+  if(emailInput) emailInput.value = user.email || "";
+  try{
+    const snapshot = await window.flocaCloud.loadSnapshot();
+    if(snapshot){
+      applyFlocaSnapshot(snapshot);
+    }else{
+      currentUser = {
+        username: user.displayName || getDisplayUserName(),
+        email: user.email,
+        uid: user.uid,
+        isGuest:false,
+        cloud:true,
+        updatedAt:new Date().toISOString()
+      };
+      saveLocalSnapshot();
+      await flocaSaveToCloudNow();
+      renderAllAfterCloudSync("첫 클라우드 저장을 만들었어요.");
+    }
+  }catch(error){
+    console.error("FLOCA cloud load failed", error);
+    const msg = document.getElementById("settingLoginMessage");
+    if(msg) msg.textContent = "클라우드 불러오기 실패: Firestore 규칙을 확인해 주세요.";
+  }
+});
 
 function getWeekOfDate(dateString){
   const date = new Date(dateString);
@@ -9951,6 +10235,20 @@ document.getElementById("saveGoal").addEventListener("click",()=>{
   document.getElementById("goalTitle").value = "";
   document.getElementById("goalMemo").value = "";
   renderGoalsSection();
+});
+
+document.addEventListener("click", ()=>setTimeout(()=>window.flocaScheduleCloudSave?.(), 350));
+document.addEventListener("change", ()=>setTimeout(()=>window.flocaScheduleCloudSave?.(), 350));
+setInterval(()=>window.flocaScheduleCloudSave?.(), 15000);
+
+window.flocaCloud?.authReady?.then(async user=>{
+  if(!user) return;
+  try{
+    const snapshot = await window.flocaCloud.loadSnapshot();
+    if(snapshot) applyFlocaSnapshot(snapshot);
+  }catch(error){
+    console.error("FLOCA initial cloud load failed", error);
+  }
 });
 
 selectedWeek = getWeekOfDate(selectedDate);
