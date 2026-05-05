@@ -7523,6 +7523,27 @@ h2{
     return doc(db, "users", activeUser.uid, "floca", "appState");
   }
 
+  function profileRef(){
+    if(!activeUser) return null;
+    return doc(db, "users", activeUser.uid, "profile", "main");
+  }
+
+  async function saveCloudProfile(displayName){
+    const name = String(displayName || "").trim();
+    if(!activeUser || !name) return { skipped:true };
+    if(activeUser.displayName !== name){
+      await updateProfile(activeUser, { displayName: name });
+    }
+    await setDoc(profileRef(), {
+      nickname: name,
+      displayName: name,
+      email: activeUser.email || "",
+      uid: activeUser.uid,
+      updatedAt: serverTimestamp()
+    }, { merge:true });
+    return { saved:true };
+  }
+
   async function signInOrCreate(email, password, displayName){
     let credential;
     try{
@@ -7534,10 +7555,10 @@ h2{
         throw error;
       }
     }
-    if(displayName){
-      await updateProfile(credential.user, { displayName });
-    }
     activeUser = credential.user;
+    if(displayName){
+      await saveCloudProfile(displayName);
+    }
     return credential.user;
   }
 
@@ -7562,10 +7583,10 @@ h2{
 
   async function signInWithGoogle(displayName){
     const credential = await signInWithPopup(auth, googleProvider);
-    if(displayName && credential.user && !credential.user.displayName){
-      await updateProfile(credential.user, { displayName });
-    }
     activeUser = credential.user;
+    if(displayName){
+      await saveCloudProfile(displayName);
+    }
     return credential.user;
   }
 
@@ -7590,6 +7611,7 @@ h2{
     signInWithGoogle,
     loadSnapshot,
     saveSnapshot,
+    saveProfile: saveCloudProfile,
     logout
   };
   window.dispatchEvent(new CustomEvent("floca:firebase-ready", { detail: window.flocaCloud }));
@@ -9174,9 +9196,13 @@ async function saveUserNameFromSettings(){
 
   try{
     if(msg) msg.textContent = "로그인 중이에요...";
+    const localBeforeLogin = getFlocaSnapshot();
+    saveLocalSnapshot();
     const user = await window.flocaCloud.signInOrCreate(email, password, username);
+    const resolvedUsername = username || user.displayName || getDisplayUserName();
+    await window.flocaCloud.saveProfile?.(resolvedUsername);
     currentUser = {
-      username,
+      username: resolvedUsername,
       email:user.email,
       uid:user.uid,
       isGuest:false,
@@ -9187,11 +9213,23 @@ async function saveUserNameFromSettings(){
 
     const snapshot = await window.flocaCloud.loadSnapshot();
     if(snapshot){
-      applyFlocaSnapshot(snapshot);
-      if(msg) msg.textContent = "로그인 완료. 클라우드 데이터를 불러왔어요.";
+      applyFlocaSnapshot(mergeFlocaSnapshots(snapshot, localBeforeLogin));
+      currentUser = {
+        ...(currentUser || {}),
+        username: resolvedUsername,
+        email:user.email,
+        uid:user.uid,
+        isGuest:false,
+        cloud:true,
+        updatedAt:new Date().toISOString()
+      };
+      saveLocalSnapshot();
+      await window.flocaCloud.saveProfile?.(resolvedUsername);
+      await flocaSaveToCloudNow();
+      if(msg) msg.textContent = "로그인 완료. 닉네임과 클라우드 데이터를 불러왔어요.";
     }else{
       await flocaSaveToCloudNow();
-      if(msg) msg.textContent = "로그인 완료. 현재 기기 데이터를 클라우드에 저장했어요.";
+      if(msg) msg.textContent = "로그인 완료. 닉네임과 현재 기기 데이터를 클라우드에 저장했어요.";
     }
     renderSettingsProfile();
     renderMypageUserProfile();
@@ -9217,9 +9255,14 @@ async function loginWithGoogleFromSettings(){
 
   try{
     if(msg) msg.textContent = "Google 로그인 창을 여는 중이에요...";
-    const user = await window.flocaCloud.signInWithGoogle(username || getDisplayUserName());
+    const localBeforeLogin = getFlocaSnapshot();
+    saveLocalSnapshot();
+    const preferredUsername = username || currentUser?.username || getDisplayUserName();
+    const user = await window.flocaCloud.signInWithGoogle(preferredUsername);
+    const resolvedUsername = username || currentUser?.username || user.displayName || getDisplayUserName();
+    await window.flocaCloud.saveProfile?.(resolvedUsername);
     currentUser = {
-      username: username || user.displayName || getDisplayUserName(),
+      username: resolvedUsername,
       email:user.email,
       uid:user.uid,
       isGuest:false,
@@ -9231,11 +9274,24 @@ async function loginWithGoogleFromSettings(){
 
     const snapshot = await window.flocaCloud.loadSnapshot();
     if(snapshot){
-      applyFlocaSnapshot(snapshot);
-      if(msg) msg.textContent = "Google 로그인 완료. 클라우드 데이터를 불러왔어요.";
+      applyFlocaSnapshot(mergeFlocaSnapshots(snapshot, localBeforeLogin));
+      currentUser = {
+        ...(currentUser || {}),
+        username: resolvedUsername,
+        email:user.email,
+        uid:user.uid,
+        isGuest:false,
+        cloud:true,
+        provider:"google",
+        updatedAt:new Date().toISOString()
+      };
+      saveLocalSnapshot();
+      await window.flocaCloud.saveProfile?.(resolvedUsername);
+      await flocaSaveToCloudNow();
+      if(msg) msg.textContent = "Google 로그인 완료. 닉네임과 클라우드 데이터를 불러왔어요.";
     }else{
       await flocaSaveToCloudNow();
-      if(msg) msg.textContent = "Google 로그인 완료. 현재 기기 데이터를 클라우드에 저장했어요.";
+      if(msg) msg.textContent = "Google 로그인 완료. 닉네임과 현재 기기 데이터를 클라우드에 저장했어요.";
     }
     renderSettingsProfile();
     renderMypageUserProfile();
@@ -9427,6 +9483,65 @@ let dailyGoalViewMode = "calendar";
 /* Firebase cloud sync bridge */
 let flocaCloudSaveTimer = null;
 let flocaCloudIsApplying = false;
+const FLOCA_FULL_SNAPSHOT_KEY = "floca_full_snapshot_v1";
+
+function arrayByIdMerge(cloudArr, localArr){
+  const map = new Map();
+  (Array.isArray(cloudArr) ? cloudArr : []).forEach(item => map.set(String(item && item.id ? item.id : Math.random()), item));
+  (Array.isArray(localArr) ? localArr : []).forEach(item => map.set(String(item && item.id ? item.id : Math.random()), item));
+  return Array.from(map.values());
+}
+
+function objectArrayMerge(cloudObj, localObj){
+  const out = { ...(cloudObj || {}) };
+  Object.keys(localObj || {}).forEach(key => {
+    out[key] = arrayByIdMerge(out[key], localObj[key]);
+  });
+  return out;
+}
+
+function snapshotHasUserData(snapshot){
+  if(!snapshot) return false;
+  const todoCount = Array.isArray(snapshot.todos) ? snapshot.todos.length : 0;
+  const lifeCount = Array.isArray(snapshot.goals?.life) ? snapshot.goals.life.length : 0;
+  const yearCount = Array.isArray(snapshot.goals?.year) ? snapshot.goals.year.length : 0;
+  const monthCount = Object.values(snapshot.goals?.month || {}).reduce((n,v)=>n+(Array.isArray(v)?v.length:0),0);
+  const weekCount = Object.values(snapshot.goals?.week || {}).reduce((n,v)=>n+(Array.isArray(v)?v.length:0),0);
+  const dayCount = Object.values(snapshot.goals?.day || {}).reduce((n,v)=>n+(Array.isArray(v)?v.length:0),0);
+  const brainCount = String(snapshot.brainDump || "").trim().length;
+  const rewardCount = Number(snapshot.rewardState?.earnedPoints || 0) + Number(snapshot.rewardState?.spent || 0) + (Array.isArray(snapshot.rewardState?.inventory) ? snapshot.rewardState.inventory.length : 0);
+  const recordCount = Object.keys(snapshot.dailyCloseRecords || {}).length;
+  return (todoCount + lifeCount + yearCount + monthCount + weekCount + dayCount + rewardCount + recordCount + brainCount) > 0;
+}
+
+function mergeFlocaSnapshots(cloudSnapshot, localSnapshot){
+  if(!snapshotHasUserData(localSnapshot)) return cloudSnapshot || localSnapshot;
+  if(!snapshotHasUserData(cloudSnapshot)) return localSnapshot;
+  return {
+    ...(cloudSnapshot || {}),
+    ...(localSnapshot || {}),
+    currentUser: { ...(cloudSnapshot?.currentUser || {}), ...(localSnapshot?.currentUser || {}) },
+    goals: {
+      life: arrayByIdMerge(cloudSnapshot?.goals?.life, localSnapshot?.goals?.life),
+      year: arrayByIdMerge(cloudSnapshot?.goals?.year, localSnapshot?.goals?.year),
+      month: objectArrayMerge(cloudSnapshot?.goals?.month, localSnapshot?.goals?.month),
+      week: objectArrayMerge(cloudSnapshot?.goals?.week, localSnapshot?.goals?.week),
+      day: objectArrayMerge(cloudSnapshot?.goals?.day, localSnapshot?.goals?.day)
+    },
+    todos: arrayByIdMerge(cloudSnapshot?.todos, localSnapshot?.todos),
+    dailyCloseRecords: { ...(cloudSnapshot?.dailyCloseRecords || {}), ...(localSnapshot?.dailyCloseRecords || {}) },
+    rewardState: snapshotHasUserData({rewardState: localSnapshot?.rewardState}) ? localSnapshot.rewardState : cloudSnapshot?.rewardState,
+    brainDump: String(localSnapshot?.brainDump || "").trim() ? localSnapshot.brainDump : cloudSnapshot?.brainDump,
+    savedAt: new Date().toISOString()
+  };
+}
+
+function loadLocalFullSnapshot(){
+  try{
+    const saved = JSON.parse(localStorage.getItem(FLOCA_FULL_SNAPSHOT_KEY) || "null");
+    return saved && saved.version ? saved : null;
+  }catch(e){ return null; }
+}
 
 function getFlocaSnapshot(){
   try{ syncDayGoals(); }catch(e){}
@@ -9451,6 +9566,7 @@ function saveLocalSnapshot(){
   try{ localStorage.setItem("floca_daily_close_records", JSON.stringify(dailyCloseRecords || {})); }catch(e){}
   try{ localStorage.setItem("floca_reward_state", JSON.stringify(rewardState || {})); }catch(e){}
   try{ if(brainDump) localStorage.setItem("floca_brain_dump", brainDump.value || ""); }catch(e){}
+  try{ localStorage.setItem(FLOCA_FULL_SNAPSHOT_KEY, JSON.stringify(getFlocaSnapshot())); }catch(e){}
 }
 
 function renderAllAfterCloudSync(message){
@@ -9534,7 +9650,8 @@ window.addEventListener("floca:auth-changed", async event => {
   try{
     const snapshot = await window.flocaCloud.loadSnapshot();
     if(snapshot){
-      applyFlocaSnapshot(snapshot);
+      const localBeforeCloud = getFlocaSnapshot();
+      applyFlocaSnapshot(mergeFlocaSnapshots(snapshot, localBeforeCloud));
       currentUser = {
         ...(currentUser || {}),
         username: user.displayName || currentUser?.username || getDisplayUserName(),
@@ -10381,11 +10498,16 @@ window.flocaCloud?.authReady?.then(async user=>{
   if(!user) return;
   try{
     const snapshot = await window.flocaCloud.loadSnapshot();
-    if(snapshot) applyFlocaSnapshot(snapshot);
+    if(snapshot) applyFlocaSnapshot(mergeFlocaSnapshots(snapshot, getFlocaSnapshot()));
   }catch(error){
     console.error("FLOCA initial cloud load failed", error);
   }
 });
+
+const flocaInitialLocalSnapshot = loadLocalFullSnapshot();
+if(flocaInitialLocalSnapshot && snapshotHasUserData(flocaInitialLocalSnapshot)){
+  applyFlocaSnapshot(flocaInitialLocalSnapshot);
+}
 
 selectedWeek = getWeekOfDate(selectedDate);
 syncTodosToSelectedDay();
